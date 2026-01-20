@@ -117,5 +117,11 @@ src/
 
 ## 라이선스
 
-MIT License
+Copyright (c) 2026 Nyogi
+
+This software is proprietary and confidential.
+Unauthorized copying, modification, distribution,
+or use of this software, via any medium, is strictly
+prohibited without prior written permission.
+
 
