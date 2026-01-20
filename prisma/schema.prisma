@@ -1,0 +1,239 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 사용자 모델
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  password      String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // 결제 관련
+  isPremium         Boolean  @default(false)
+  totalMeetingTime  Int      @default(0) // 누적 미팅 시간 (초)
+  freeTimeRemaining Int      @default(3600) // 무료 미팅 시간 (초) - 기본 1시간
+
+  // 관계
+  accounts      Account[]
+  sessions      Session[]
+  meetings      Meeting[]
+  workspaces    WorkspaceMember[]
+  ownedWorkspaces Workspace[]
+  sharedMeetings  MeetingShare[]
+
+  @@map("users")
+}
+
+// NextAuth 관련 모델
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+  @@map("verification_tokens")
+}
+
+// 워크스페이스 모델
+model Workspace {
+  id          String   @id @default(cuid())
+  name        String
+  description String?
+  ownerId     String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  owner    User              @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  members  WorkspaceMember[]
+  meetings Meeting[]
+
+  @@map("workspaces")
+}
+
+model WorkspaceMember {
+  id          String   @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        String   @default("member") // owner, admin, member
+  joinedAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@map("workspace_members")
+}
+
+// 미팅 모델
+model Meeting {
+  id          String   @id @default(cuid())
+  title       String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  startedAt   DateTime?
+  endedAt     DateTime?
+  duration    Int      @default(0) // 미팅 시간 (초)
+
+  // 미팅 타입
+  meetingType String @default("in-person") // in-person, zoom, google-meet
+  meetingLink String? // Zoom/Google Meet 링크
+
+  // 언어 설정
+  languageA String @default("ko") // 화자 A 언어
+  languageB String @default("en") // 화자 B 언어
+
+  // 상태
+  status String @default("scheduled") // scheduled, in-progress, completed, cancelled
+
+  // 소유자
+  userId      String
+  workspaceId String?
+
+  // 공유 설정
+  shareType  String  @default("private") // public, private, whitelist
+  shareLink  String? @unique
+
+  // 관계
+  user         User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace    Workspace?      @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  contexts     MeetingContext[]
+  transcripts  Transcript[]
+  speakers     Speaker[]
+  summary      MeetingSummary?
+  shares       MeetingShare[]
+
+  @@map("meetings")
+}
+
+// 전문 용어 컨텍스트
+model MeetingContext {
+  id        String   @id @default(cuid())
+  meetingId String
+  term      String   // 전문 용어
+  meaning   String?  // 용어 설명
+  createdAt DateTime @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@map("meeting_contexts")
+}
+
+// 화자 정보
+model Speaker {
+  id        String   @id @default(cuid())
+  meetingId String
+  name      String   // 화자 이름 (기본: 화자 1, 화자 2)
+  language  String   // 화자의 주 사용 언어
+  order     Int      // 화자 순서
+  createdAt DateTime @default(now())
+
+  meeting     Meeting      @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  transcripts Transcript[]
+
+  @@map("speakers")
+}
+
+// 발화 기록 (트랜스크립트)
+model Transcript {
+  id        String   @id @default(cuid())
+  meetingId String
+  speakerId String?
+  
+  // 원문 및 번역
+  originalText   String // 원문
+  translatedText String // 번역문
+  originalLang   String // 원문 언어
+  translatedLang String // 번역 언어
+  
+  // 타임스탬프
+  startTime Int // 미팅 시작부터의 시간 (밀리초)
+  endTime   Int
+  
+  createdAt DateTime @default(now())
+
+  meeting Meeting  @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  speaker Speaker? @relation(fields: [speakerId], references: [id], onDelete: SetNull)
+
+  @@map("transcripts")
+}
+
+// AI 요약
+model MeetingSummary {
+  id        String   @id @default(cuid())
+  meetingId String   @unique
+  
+  // 언어 A 요약
+  summaryA       String // 핵심 논의 요약
+  decisionsA     String // 결정 사항
+  actionItemsA   String // 액션 아이템
+  
+  // 언어 B 요약
+  summaryB       String
+  decisionsB     String
+  actionItemsB   String
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+  @@map("meeting_summaries")
+}
+
+// 미팅 공유 (화이트리스트)
+model MeetingShare {
+  id        String   @id @default(cuid())
+  meetingId String
+  userId    String?  // 등록된 사용자인 경우
+  email     String   // 공유 대상 이메일
+  canEdit   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  meeting Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@unique([meetingId, email])
+  @@map("meeting_shares")
+}
+
