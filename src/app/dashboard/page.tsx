@@ -4,8 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
-import { format } from 'date-fns'
-import { ko } from 'date-fns/locale'
+import { formatDateTime, formatDurationText } from '@/lib/datetime'
 import {
   Plus,
   Video,
@@ -84,15 +83,6 @@ export default function DashboardPage() {
     }
   }, [session])
 
-  const formatDuration = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600)
-    const minutes = Math.floor((seconds % 3600) / 60)
-    if (hours > 0) {
-      return `${hours}시간 ${minutes}분`
-    }
-    return `${minutes}분`
-  }
-
   const formatTimeRemaining = (seconds: number) => {
     const minutes = Math.floor(seconds / 60)
     return `${minutes}분`
@@ -166,7 +156,7 @@ export default function DashboardPage() {
                   </div>
                   <div>
                     <p className="text-2xl font-bold text-surface-900 dark:text-white">
-                      {formatDuration(user?.totalMeetingTime || 0)}
+                      {formatDurationText(user?.totalMeetingTime || 0)}
                     </p>
                     <p className="text-xs text-surface-500">총 미팅 시간</p>
                   </div>
@@ -359,9 +349,7 @@ export default function DashboardPage() {
                             </h3>
                             <div className="flex items-center gap-2 text-sm text-surface-500">
                               <span>
-                                {format(new Date(meeting.createdAt), 'M월 d일 HH:mm', {
-                                  locale: ko,
-                                })}
+                                {formatDateTime(meeting.createdAt, 'M월 d일 HH:mm')}
                               </span>
                               <span>•</span>
                               <span>

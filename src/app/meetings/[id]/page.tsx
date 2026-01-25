@@ -6,23 +6,28 @@ import { useSession } from 'next-auth/react'
 import { format } from 'date-fns'
 import { ko } from 'date-fns/locale'
 import {
-  Play,
   Square,
   Mic,
   MicOff,
   Share2,
-  Settings,
   FileText,
   Clock,
   ArrowLeft,
   Copy,
   Check,
   Loader2,
+  LayoutGrid,
+  List,
+  Volume2,
+  VolumeX,
 } from 'lucide-react'
 import { Navbar } from '@/components/layout/Navbar'
 import { Button } from '@/components/ui/Button'
 import { Card, CardBody, CardHeader } from '@/components/ui/Card'
 import { Modal } from '@/components/ui/Modal'
+import { LiveTranscript, SplitTranscriptView } from '@/components/meeting/LiveTranscript'
+import { useSpeechRecognition } from '@/hooks/useSpeechRecognition'
+import { translateText, getLanguageName, getLanguageFlag } from '@/lib/translate'
 
 interface Speaker {
   id: string
@@ -70,6 +75,18 @@ interface Meeting {
   summary: MeetingSummary | null
 }
 
+interface TranscriptEntry {
+  id: string
+  speakerId: string
+  speakerName: string
+  speakerLanguage: string
+  originalText: string
+  translatedText: string
+  translatedLanguage?: string
+  timestamp: number
+  isFinal: boolean
+}
+
 export default function MeetingDetailPage() {
   const params = useParams()
   const router = useRouter()
@@ -78,25 +95,131 @@ export default function MeetingDetailPage() {
   const [meeting, setMeeting] = useState<Meeting | null>(null)
   const [isOwner, setIsOwner] = useState(false)
   const [isLoading, setIsLoading] = useState(true)
-  const [isMicOn, setIsMicOn] = useState(false)
   const [isRecording, setIsRecording] = useState(false)
-  const [currentSpeaker, setCurrentSpeaker] = useState<string | null>(null)
+  const [currentSpeaker, setCurrentSpeaker] = useState<Speaker | null>(null)
   const [showShareModal, setShowShareModal] = useState(false)
   const [showSummaryModal, setShowSummaryModal] = useState(false)
   const [isCopied, setIsCopied] = useState(false)
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false)
+  const [viewMode, setViewMode] = useState<'list' | 'split'>('list')
+  const [showTranslation, setShowTranslation] = useState(true)
 
-  const transcriptsEndRef = useRef<HTMLDivElement>(null)
+  // 실시간 자막 상태
+  const [liveTranscripts, setLiveTranscripts] = useState<TranscriptEntry[]>([])
+  const [interimTranscript, setInterimTranscript] = useState<{
+    speakerId: string
+    speakerName: string
+    speakerLanguage: string
+    originalText: string
+    translatedText: string
+  } | null>(null)
 
-  const langNames: Record<string, string> = {
-    ko: '한국어',
-    en: 'English',
-    ja: '日本語',
-    zh: '中文',
-    es: 'Español',
-    fr: 'Français',
-    de: 'Deutsch',
-  }
+  const meetingStartTime = useRef<number>(0)
+  const transcriptIdCounter = useRef(0)
+  const [micPermission, setMicPermission] = useState<'granted' | 'denied' | 'prompt' | 'checking'>('checking')
+
+  // 현재 화자와 미팅 정보를 ref로 저장 (콜백에서 최신 값 참조)
+  const currentSpeakerRef = useRef(currentSpeaker)
+  const meetingRef = useRef(meeting)
+  
+  useEffect(() => {
+    currentSpeakerRef.current = currentSpeaker
+  }, [currentSpeaker])
+  
+  useEffect(() => {
+    meetingRef.current = meeting
+  }, [meeting])
+
+  // 음성 인식 훅
+  const {
+    isListening,
+    isSupported,
+    interimTranscript: speechInterim,
+    startListening,
+    stopListening,
+    resetTranscript,
+  } = useSpeechRecognition({
+    language: currentSpeaker?.language || 'ko',
+    continuous: true,
+    interimResults: true,
+    onResult: async (result) => {
+      const speaker = currentSpeakerRef.current
+      const mtg = meetingRef.current
+      
+      console.log('[Meeting] onResult called:', result, 'speaker:', speaker?.name)
+      
+      if (!speaker || !mtg) {
+        console.log('[Meeting] No speaker or meeting, skipping')
+        return
+      }
+
+      if (result.isFinal && result.transcript.trim()) {
+        const targetLang = speaker.language === mtg.languageA 
+          ? mtg.languageB 
+          : mtg.languageA
+
+        console.log('[Meeting] Processing final transcript:', result.transcript)
+
+        // 번역 수행
+        const translated = await translateText(
+          result.transcript,
+          speaker.language,
+          targetLang
+        )
+
+        const newEntry: TranscriptEntry = {
+          id: `transcript-${transcriptIdCounter.current++}`,
+          speakerId: speaker.id,
+          speakerName: speaker.name,
+          speakerLanguage: speaker.language,
+          originalText: result.transcript,
+          translatedText: translated.translatedText,
+          translatedLanguage: targetLang,
+          timestamp: Date.now(),
+          isFinal: true,
+        }
+
+        console.log('[Meeting] Adding transcript:', newEntry)
+        setLiveTranscripts((prev) => [...prev, newEntry])
+        setInterimTranscript(null)
+
+        // 서버에 저장
+        saveTranscript(newEntry)
+      }
+    },
+    onError: (error) => {
+      console.error('Speech recognition error:', error)
+    },
+  })
+
+  // 중간 결과 번역 및 표시
+  useEffect(() => {
+    if (speechInterim && currentSpeaker && meeting) {
+      const updateInterim = async () => {
+        const targetLang = currentSpeaker.language === meeting.languageA 
+          ? meeting.languageB 
+          : meeting.languageA
+
+        const translated = await translateText(
+          speechInterim,
+          currentSpeaker.language,
+          targetLang
+        )
+
+        setInterimTranscript({
+          speakerId: currentSpeaker.id,
+          speakerName: currentSpeaker.name,
+          speakerLanguage: currentSpeaker.language,
+          originalText: speechInterim,
+          translatedText: translated.translatedText,
+        })
+      }
+
+      updateInterim()
+    } else {
+      setInterimTranscript(null)
+    }
+  }, [speechInterim, currentSpeaker, meeting])
 
   const fetchMeeting = useCallback(async () => {
     try {
@@ -106,6 +229,32 @@ export default function MeetingDetailPage() {
         setMeeting(data.meeting)
         setIsOwner(data.isOwner)
         setIsRecording(data.meeting.status === 'in-progress')
+        
+        // 기본 화자 설정
+        if (data.meeting.speakers.length > 0 && !currentSpeaker) {
+          setCurrentSpeaker(data.meeting.speakers[0])
+        }
+
+        // 기존 트랜스크립트 변환
+        // startTime은 미팅 시작부터의 경과 시간(ms)이므로, 미팅 시작 시간을 더해 절대 시간으로 변환
+        const meetingStartedAt = data.meeting.startedAt 
+          ? new Date(data.meeting.startedAt).getTime() 
+          : Date.now()
+        
+        const existingTranscripts: TranscriptEntry[] = data.meeting.transcripts.map(
+          (t: Transcript) => ({
+            id: t.id,
+            speakerId: t.speaker?.id || '',
+            speakerName: t.speaker?.name || '알 수 없음',
+            speakerLanguage: t.originalLang,
+            originalText: t.originalText,
+            translatedText: t.translatedText,
+            translatedLanguage: t.translatedLang,
+            timestamp: meetingStartedAt + t.startTime, // 절대 시간으로 변환
+            isFinal: true,
+          })
+        )
+        setLiveTranscripts(existingTranscripts)
       } else if (res.status === 404) {
         router.push('/meetings')
       }
@@ -114,7 +263,7 @@ export default function MeetingDetailPage() {
     } finally {
       setIsLoading(false)
     }
-  }, [params.id, router])
+  }, [params.id, router, currentSpeaker])
 
   useEffect(() => {
     if (authStatus === 'unauthenticated') {
@@ -127,11 +276,83 @@ export default function MeetingDetailPage() {
     }
   }, [authStatus, fetchMeeting, router])
 
+  // 마이크 권한 확인
+  const checkMicPermission = useCallback(async () => {
+    try {
+      // navigator.permissions API 사용 (지원되는 경우)
+      if (navigator.permissions) {
+        const result = await navigator.permissions.query({ name: 'microphone' as PermissionName })
+        setMicPermission(result.state as 'granted' | 'denied' | 'prompt')
+        
+        // 권한 상태 변경 감지
+        result.onchange = () => {
+          setMicPermission(result.state as 'granted' | 'denied' | 'prompt')
+        }
+      } else {
+        setMicPermission('prompt')
+      }
+    } catch {
+      // permissions API가 지원되지 않으면 prompt 상태로 가정
+      setMicPermission('prompt')
+    }
+  }, [])
+
+  // 마이크 권한 요청
+  const requestMicPermission = useCallback(async (): Promise<boolean> => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // 권한 획득 후 스트림 정리
+      stream.getTracks().forEach(track => track.stop())
+      setMicPermission('granted')
+      return true
+    } catch (error) {
+      console.error('마이크 권한 요청 실패:', error)
+      setMicPermission('denied')
+      return false
+    }
+  }, [])
+
+  // 컴포넌트 마운트 시 마이크 권한 확인
   useEffect(() => {
-    transcriptsEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [meeting?.transcripts])
+    checkMicPermission()
+  }, [checkMicPermission])
+
+  // 트랜스크립트 서버 저장
+  const saveTranscript = async (entry: TranscriptEntry) => {
+    try {
+      await fetch(`/api/meetings/${params.id}/transcripts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          speakerId: entry.speakerId,
+          originalText: entry.originalText,
+          translatedText: entry.translatedText, // 번역된 텍스트 추가
+          originalLang: entry.speakerLanguage,
+          translatedLang: entry.translatedLanguage, // 번역 언어 추가
+          startTime: entry.timestamp - meetingStartTime.current,
+          endTime: entry.timestamp - meetingStartTime.current + 1000,
+        }),
+      })
+    } catch (error) {
+      console.error('트랜스크립트 저장 오류:', error)
+    }
+  }
 
   const startMeeting = async () => {
+    if (!isSupported) {
+      alert('이 브라우저에서는 음성 인식이 지원되지 않습니다. Chrome 브라우저를 사용해주세요.')
+      return
+    }
+
+    // 마이크 권한 확인 및 요청
+    if (micPermission !== 'granted') {
+      const granted = await requestMicPermission()
+      if (!granted) {
+        alert('마이크 권한이 필요합니다. 브라우저 설정에서 마이크 권한을 허용해주세요.')
+        return
+      }
+    }
+
     try {
       const res = await fetch(`/api/meetings/${params.id}/start`, {
         method: 'POST',
@@ -139,7 +360,8 @@ export default function MeetingDetailPage() {
 
       if (res.ok) {
         setIsRecording(true)
-        setIsMicOn(true)
+        meetingStartTime.current = Date.now()
+        startListening()
         fetchMeeting()
       } else {
         const error = await res.json()
@@ -151,6 +373,8 @@ export default function MeetingDetailPage() {
   }
 
   const endMeeting = async () => {
+    stopListening()
+    
     try {
       const res = await fetch(`/api/meetings/${params.id}/end`, {
         method: 'POST',
@@ -158,12 +382,21 @@ export default function MeetingDetailPage() {
 
       if (res.ok) {
         setIsRecording(false)
-        setIsMicOn(false)
+        resetTranscript()
         fetchMeeting()
       }
     } catch {
       alert('미팅 종료 중 오류가 발생했습니다.')
     }
+  }
+
+  // 마이크 일시정지/재개 (미팅 중에만)
+  const pauseMic = () => {
+    stopListening()
+  }
+
+  const resumeMic = () => {
+    startListening()
   }
 
   const generateSummary = async () => {
@@ -205,6 +438,22 @@ export default function MeetingDetailPage() {
     return `${minutes}:${secs.toString().padStart(2, '0')}`
   }
 
+  // 실시간 타이머
+  const [elapsedTime, setElapsedTime] = useState(0)
+  useEffect(() => {
+    let interval: NodeJS.Timeout | null = null
+    if (isRecording && meeting?.startedAt) {
+      interval = setInterval(() => {
+        setElapsedTime(
+          Math.floor((Date.now() - new Date(meeting.startedAt!).getTime()) / 1000)
+        )
+      }, 1000)
+    }
+    return () => {
+      if (interval) clearInterval(interval)
+    }
+  }, [isRecording, meeting?.startedAt])
+
   if (authStatus === 'loading' || isLoading) {
     return (
       <div className="min-h-screen mesh-bg">
@@ -231,10 +480,10 @@ export default function MeetingDetailPage() {
     <div className="min-h-screen mesh-bg">
       <Navbar />
 
-      <main className="pt-24 pb-12 px-4">
-        <div className="max-w-6xl mx-auto">
+      <main className="pt-20 pb-6 px-4">
+        <div className="max-w-7xl mx-auto">
           {/* Header */}
-          <div className="flex items-start justify-between mb-6">
+          <div className="flex items-start justify-between mb-4">
             <div className="flex items-center gap-4">
               <button
                 onClick={() => router.push('/meetings')}
@@ -243,22 +492,13 @@ export default function MeetingDetailPage() {
                 <ArrowLeft className="w-5 h-5 text-surface-500" />
               </button>
               <div>
-                <h1 className="text-2xl font-display font-bold text-surface-900 dark:text-white">
+                <h1 className="text-xl font-display font-bold text-surface-900 dark:text-white">
                   {meeting.title}
                 </h1>
                 <div className="flex items-center gap-3 mt-1 text-sm text-surface-500">
                   <span>
-                    {langNames[meeting.languageA]} ↔ {langNames[meeting.languageB]}
-                  </span>
-                  <span>•</span>
-                  <span>
-                    {meeting.startedAt
-                      ? format(new Date(meeting.startedAt), 'yyyy년 M월 d일 HH:mm', {
-                          locale: ko,
-                        })
-                      : format(new Date(meeting.startedAt || Date.now()), 'yyyy년 M월 d일', {
-                          locale: ko,
-                        })}
+                    {getLanguageFlag(meeting.languageA)} {getLanguageName(meeting.languageA)} ↔{' '}
+                    {getLanguageFlag(meeting.languageB)} {getLanguageName(meeting.languageB)}
                   </span>
                 </div>
               </div>
@@ -267,6 +507,22 @@ export default function MeetingDetailPage() {
             {isOwner && (
               <div className="flex items-center gap-2">
                 <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowTranslation(!showTranslation)}
+                  leftIcon={showTranslation ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+                >
+                  {showTranslation ? '번역 표시' : '번역 숨김'}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setViewMode(viewMode === 'list' ? 'split' : 'list')}
+                  leftIcon={viewMode === 'list' ? <LayoutGrid className="w-4 h-4" /> : <List className="w-4 h-4" />}
+                >
+                  {viewMode === 'list' ? '분할 뷰' : '리스트 뷰'}
+                </Button>
+                <Button
                   variant="secondary"
                   size="sm"
                   leftIcon={<Share2 className="w-4 h-4" />}
@@ -274,73 +530,145 @@ export default function MeetingDetailPage() {
                 >
                   공유
                 </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  leftIcon={<Settings className="w-4 h-4" />}
-                  onClick={() => router.push(`/meetings/${meeting.id}/settings`)}
-                >
-                  설정
-                </Button>
               </div>
             )}
           </div>
 
-          <div className="grid lg:grid-cols-3 gap-6">
-            {/* Main Content */}
-            <div className="lg:col-span-2 space-y-6">
-              {/* Control Panel */}
-              {isOwner && meeting.status !== 'completed' && (
-                <Card>
-                  <CardBody className="p-6">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-4">
-                        {isRecording ? (
-                          <div className="flex items-center gap-2">
-                            <span className="relative flex h-3 w-3">
-                              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
-                              <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
-                            </span>
-                            <span className="text-red-600 font-medium">녹음 중</span>
-                          </div>
-                        ) : (
-                          <span className="text-surface-500">대기 중</span>
-                        )}
-                        {meeting.startedAt && (
-                          <div className="flex items-center gap-1.5 text-surface-600">
-                            <Clock className="w-4 h-4" />
-                            <span className="font-mono">
-                              {formatDuration(
-                                isRecording
-                                  ? Math.floor(
-                                      (Date.now() - new Date(meeting.startedAt).getTime()) / 1000
-                                    )
-                                  : meeting.duration
-                              )}
-                            </span>
-                          </div>
-                        )}
+          {/* 마이크 권한 안내 */}
+          {isOwner && micPermission === 'denied' && meeting.status !== 'completed' && (
+            <div className="mb-4 p-4 rounded-xl bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800">
+              <div className="flex items-start gap-3">
+                <MicOff className="w-5 h-5 text-amber-600 mt-0.5" />
+                <div>
+                  <p className="font-medium text-amber-800 dark:text-amber-200">마이크 권한이 필요합니다</p>
+                  <p className="text-sm text-amber-700 dark:text-amber-300 mt-1">
+                    음성 인식을 사용하려면 브라우저에서 마이크 권한을 허용해주세요.
+                  </p>
+                  <div className="mt-3 flex gap-2">
+                    <Button
+                      size="sm"
+                      onClick={requestMicPermission}
+                      leftIcon={<Mic className="w-4 h-4" />}
+                    >
+                      마이크 권한 허용
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => window.location.reload()}
+                    >
+                      페이지 새로고침
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Control Panel */}
+          {isOwner && (
+            <Card className="mb-4">
+              <CardBody className="p-4">
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+                  {/* 상태 및 타이머 */}
+                  <div className="flex items-center gap-6">
+                    <div className="flex items-center gap-3">
+                      {isRecording ? (
+                        <div className="flex items-center gap-2">
+                          <span className="relative flex h-3 w-3">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+                          </span>
+                          <span className="text-red-600 font-medium">녹음 중</span>
+                        </div>
+                      ) : meeting.status === 'completed' ? (
+                        <span className="text-green-600 font-medium">완료됨</span>
+                      ) : (
+                        <span className="text-surface-500">대기 중</span>
+                      )}
+                    </div>
+
+                    {(isRecording || meeting.status === 'completed') && (
+                      <div className="flex items-center gap-2 text-surface-600 font-mono text-lg">
+                        <Clock className="w-5 h-5" />
+                        <span>
+                          {formatDuration(isRecording ? elapsedTime : meeting.duration)}
+                        </span>
                       </div>
+                    )}
 
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant={isMicOn ? 'primary' : 'secondary'}
-                          size="sm"
-                          onClick={() => setIsMicOn(!isMicOn)}
-                          disabled={!isRecording}
+                    {isListening && (
+                      <div className="flex items-center gap-2 text-green-600">
+                        <Mic className="w-4 h-4 animate-pulse" />
+                        <span className="text-sm">마이크 활성</span>
+                      </div>
+                    )}
+
+                    {isRecording && !isListening && (
+                      <div className="flex items-center gap-2 text-amber-600">
+                        <MicOff className="w-4 h-4" />
+                        <span className="text-sm">마이크 일시정지</span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 화자 선택 */}
+                  {isRecording && (
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-surface-500 mr-2">화자:</span>
+                      {meeting.speakers.map((speaker) => (
+                        <button
+                          key={speaker.id}
+                          onClick={() => setCurrentSpeaker(speaker)}
+                          className={`
+                            px-4 py-2 rounded-xl text-sm font-medium transition-all
+                            ${currentSpeaker?.id === speaker.id
+                              ? speaker.language === meeting.languageA
+                                ? 'bg-blue-500 text-white shadow-lg shadow-blue-500/25'
+                                : 'bg-green-500 text-white shadow-lg shadow-green-500/25'
+                              : 'bg-surface-100 dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-200'
+                            }
+                          `}
                         >
-                          {isMicOn ? (
-                            <Mic className="w-5 h-5" />
-                          ) : (
-                            <MicOff className="w-5 h-5" />
-                          )}
-                        </Button>
+                          {getLanguageFlag(speaker.language)} {speaker.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
-                        {!isRecording ? (
-                          <Button onClick={startMeeting} leftIcon={<Play className="w-5 h-5" />}>
-                            미팅 시작
-                          </Button>
-                        ) : (
+                  {/* 컨트롤 버튼 */}
+                  <div className="flex items-center gap-2">
+                    {meeting.status !== 'completed' && (
+                      !isRecording ? (
+                        <Button
+                          onClick={startMeeting}
+                          leftIcon={<Mic className="w-5 h-5" />}
+                          className="shadow-lg bg-gradient-to-r from-primary-500 to-accent-500 hover:from-primary-600 hover:to-accent-600"
+                        >
+                          미팅 시작
+                        </Button>
+                      ) : (
+                        <>
+                          {/* 마이크 일시정지/재개 버튼 */}
+                          {isListening ? (
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              onClick={pauseMic}
+                              leftIcon={<MicOff className="w-5 h-5" />}
+                            >
+                              일시정지
+                            </Button>
+                          ) : (
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              onClick={resumeMic}
+                              leftIcon={<Mic className="w-5 h-5" />}
+                            >
+                              재개
+                            </Button>
+                          )}
                           <Button
                             variant="danger"
                             onClick={endMeeting}
@@ -348,220 +676,60 @@ export default function MeetingDetailPage() {
                           >
                             미팅 종료
                           </Button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Speaker Selection */}
-                    {isRecording && (
-                      <div className="mt-4 pt-4 border-t border-surface-200 dark:border-surface-700">
-                        <p className="text-sm text-surface-500 mb-2">현재 발화자 선택:</p>
-                        <div className="flex gap-2">
-                          {meeting.speakers.map((speaker) => (
-                            <button
-                              key={speaker.id}
-                              onClick={() => setCurrentSpeaker(speaker.id)}
-                              className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${
-                                currentSpeaker === speaker.id
-                                  ? 'bg-primary-600 text-white'
-                                  : 'bg-surface-100 dark:bg-surface-800 text-surface-600 dark:text-surface-400 hover:bg-surface-200 dark:hover:bg-surface-700'
-                              }`}
-                            >
-                              {speaker.name} ({langNames[speaker.language]})
-                            </button>
-                          ))}
-                        </div>
-                      </div>
+                        </>
+                      )
                     )}
-                  </CardBody>
-                </Card>
-              )}
 
-              {/* Transcripts */}
-              <Card>
-                <CardHeader>
-                  <h2 className="font-semibold text-surface-900 dark:text-white">
-                    미팅 기록
-                  </h2>
-                </CardHeader>
-                <CardBody className="p-6">
-                  {meeting.transcripts.length === 0 ? (
-                    <div className="text-center py-12">
-                      <FileText className="w-12 h-12 text-surface-300 mx-auto mb-4" />
-                      <p className="text-surface-500">
-                        {meeting.status === 'scheduled'
-                          ? '미팅을 시작하면 실시간 기록이 표시됩니다.'
-                          : '기록된 내용이 없습니다.'}
-                      </p>
-                    </div>
-                  ) : (
-                    <div className="space-y-4 max-h-[500px] overflow-y-auto">
-                      {meeting.transcripts.map((transcript) => (
-                        <div
-                          key={transcript.id}
-                          className="p-4 rounded-xl bg-surface-50 dark:bg-surface-800"
-                        >
-                          <div className="flex items-center gap-2 mb-2">
-                            <span
-                              className={`w-8 h-8 rounded-full flex items-center justify-center text-white text-sm font-medium ${
-                                transcript.speaker?.order === 1
-                                  ? 'bg-blue-500'
-                                  : 'bg-green-500'
-                              }`}
-                            >
-                              {transcript.speaker?.name?.charAt(0) || '?'}
-                            </span>
-                            <span className="font-medium text-surface-900 dark:text-white">
-                              {transcript.speaker?.name || '알 수 없음'}
-                            </span>
-                            <span
-                              className={`lang-badge ${
-                                transcript.originalLang === 'ko'
-                                  ? 'lang-badge-ko'
-                                  : 'lang-badge-en'
-                              }`}
-                            >
-                              {transcript.originalLang.toUpperCase()}
-                            </span>
-                          </div>
-                          <p className="text-surface-900 dark:text-white mb-2">
-                            {transcript.originalText}
-                          </p>
-                          <p className="text-surface-500 text-sm italic">
-                            {transcript.translatedText}
-                          </p>
-                        </div>
-                      ))}
-                      <div ref={transcriptsEndRef} />
-                    </div>
-                  )}
-                </CardBody>
-              </Card>
-            </div>
+                    {meeting.status === 'completed' && !meeting.summary && (
+                      <Button
+                        onClick={generateSummary}
+                        isLoading={isGeneratingSummary}
+                        leftIcon={<FileText className="w-5 h-5" />}
+                      >
+                        AI 요약 생성
+                      </Button>
+                    )}
 
-            {/* Sidebar */}
-            <div className="space-y-6">
-              {/* Meeting Info */}
-              <Card>
-                <CardHeader>
-                  <h2 className="font-semibold text-surface-900 dark:text-white">
-                    미팅 정보
-                  </h2>
-                </CardHeader>
-                <CardBody className="p-6 space-y-4">
-                  <div>
-                    <p className="text-sm text-surface-500 mb-1">상태</p>
-                    <span
-                      className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${
-                        meeting.status === 'completed'
-                          ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
-                          : meeting.status === 'in-progress'
-                          ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400'
-                          : 'bg-surface-100 text-surface-600 dark:bg-surface-800 dark:text-surface-400'
-                      }`}
-                    >
-                      {meeting.status === 'completed'
-                        ? '완료'
-                        : meeting.status === 'in-progress'
-                        ? '진행 중'
-                        : '예정'}
-                    </span>
-                  </div>
-
-                  {meeting.duration > 0 && (
-                    <div>
-                      <p className="text-sm text-surface-500 mb-1">미팅 시간</p>
-                      <p className="font-medium text-surface-900 dark:text-white">
-                        {formatDuration(meeting.duration)}
-                      </p>
-                    </div>
-                  )}
-
-                  <div>
-                    <p className="text-sm text-surface-500 mb-1">화자</p>
-                    <div className="space-y-2">
-                      {meeting.speakers.map((speaker) => (
-                        <div
-                          key={speaker.id}
-                          className="flex items-center gap-2 text-surface-900 dark:text-white"
-                        >
-                          <span
-                            className={`w-6 h-6 rounded-full flex items-center justify-center text-white text-xs ${
-                              speaker.order === 1 ? 'bg-blue-500' : 'bg-green-500'
-                            }`}
-                          >
-                            {speaker.order}
-                          </span>
-                          <span>{speaker.name}</span>
-                          <span className="text-surface-500 text-sm">
-                            ({langNames[speaker.language]})
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </CardBody>
-              </Card>
-
-              {/* AI Summary */}
-              <Card>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <h2 className="font-semibold text-surface-900 dark:text-white">
-                      AI 요약
-                    </h2>
                     {meeting.summary && (
                       <Button
-                        variant="ghost"
-                        size="sm"
+                        variant="secondary"
                         onClick={() => setShowSummaryModal(true)}
+                        leftIcon={<FileText className="w-5 h-5" />}
                       >
-                        자세히 보기
+                        요약 보기
                       </Button>
                     )}
                   </div>
-                </CardHeader>
-                <CardBody className="p-6">
-                  {meeting.summary ? (
-                    <div className="space-y-4">
-                      <div>
-                        <p className="text-sm text-surface-500 mb-1">핵심 요약</p>
-                        <p className="text-surface-900 dark:text-white text-sm line-clamp-3">
-                          {meeting.summary.summaryA}
-                        </p>
-                      </div>
-                      <Button
-                        variant="secondary"
-                        size="sm"
-                        className="w-full"
-                        onClick={() => setShowSummaryModal(true)}
-                      >
-                        전체 요약 보기
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="text-center py-6">
-                      <FileText className="w-10 h-10 text-surface-300 mx-auto mb-3" />
-                      <p className="text-surface-500 text-sm mb-4">
-                        {meeting.status === 'completed'
-                          ? 'AI 요약을 생성하세요'
-                          : '미팅 종료 후 요약을 생성할 수 있습니다'}
-                      </p>
-                      {meeting.status === 'completed' && isOwner && (
-                        <Button
-                          size="sm"
-                          onClick={generateSummary}
-                          isLoading={isGeneratingSummary}
-                        >
-                          요약 생성
-                        </Button>
-                      )}
-                    </div>
-                  )}
-                </CardBody>
-              </Card>
-            </div>
-          </div>
+                </div>
+              </CardBody>
+            </Card>
+          )}
+
+          {/* 실시간 자막 영역 */}
+          <Card className="h-[calc(100vh-280px)] min-h-[400px]">
+            <CardBody className="p-0 h-full">
+              {viewMode === 'list' ? (
+                <LiveTranscript
+                  transcripts={liveTranscripts}
+                  interimTranscript={interimTranscript}
+                  languageA={meeting.languageA}
+                  languageB={meeting.languageB}
+                  showTranslation={showTranslation}
+                />
+              ) : (
+                <div className="h-full p-4">
+                  <SplitTranscriptView
+                    transcripts={liveTranscripts}
+                    interimTranscript={interimTranscript}
+                    languageA={meeting.languageA}
+                    languageB={meeting.languageB}
+                    speakerA={meeting.speakers[0] || { id: '', name: '화자 1' }}
+                    speakerB={meeting.speakers[1] || { id: '', name: '화자 2' }}
+                  />
+                </div>
+              )}
+            </CardBody>
+          </Card>
         </div>
       </main>
 
@@ -611,15 +779,15 @@ export default function MeetingDetailPage() {
         isOpen={showSummaryModal}
         onClose={() => setShowSummaryModal(false)}
         title="AI 요약"
-        size="lg"
+        size="xl"
       >
         {meeting.summary ? (
           <div className="space-y-6 max-h-[60vh] overflow-y-auto">
             <div className="grid md:grid-cols-2 gap-6">
               {/* Language A Summary */}
               <div>
-                <h3 className="font-semibold text-surface-900 dark:text-white mb-4">
-                  {langNames[meeting.languageA]}
+                <h3 className="font-semibold text-surface-900 dark:text-white mb-4 flex items-center gap-2">
+                  {getLanguageFlag(meeting.languageA)} {getLanguageName(meeting.languageA)}
                 </h3>
                 <div className="space-y-4">
                   <div>
@@ -645,8 +813,8 @@ export default function MeetingDetailPage() {
 
               {/* Language B Summary */}
               <div>
-                <h3 className="font-semibold text-surface-900 dark:text-white mb-4">
-                  {langNames[meeting.languageB]}
+                <h3 className="font-semibold text-surface-900 dark:text-white mb-4 flex items-center gap-2">
+                  {getLanguageFlag(meeting.languageB)} {getLanguageName(meeting.languageB)}
                 </h3>
                 <div className="space-y-4">
                   <div>
@@ -681,4 +849,3 @@ export default function MeetingDetailPage() {
     </div>
   )
 }
-

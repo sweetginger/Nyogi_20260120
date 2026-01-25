@@ -29,14 +29,26 @@ export async function POST(
     }
 
     const body = await request.json()
-    const { speakerId, originalText, originalLang, startTime, endTime } = body
+    const { 
+      speakerId, 
+      originalText, 
+      originalLang, 
+      translatedText: clientTranslatedText, // 클라이언트에서 번역한 텍스트
+      translatedLang: clientTranslatedLang,  // 클라이언트에서 지정한 번역 언어
+      startTime, 
+      endTime 
+    } = body
 
-    // 번역 수행 (여기서는 간단한 mock 번역)
-    const translatedLang = originalLang === meeting.languageA ? meeting.languageB : meeting.languageA
+    // 번역 언어 결정 (클라이언트가 보낸 값 우선, 없으면 자동 계산)
+    const translatedLang = clientTranslatedLang || 
+      (originalLang === meeting.languageA ? meeting.languageB : meeting.languageA)
     
-    // 실제로는 번역 API를 호출해야 함
-    // 컨텍스트를 활용한 번역 정확도 향상 가능
-    const translatedText = await translateText(originalText, originalLang, translatedLang, meeting.contexts)
+    // 번역 텍스트 결정 (클라이언트가 보낸 값 우선, 없으면 서버에서 번역)
+    let translatedText = clientTranslatedText
+    if (!translatedText) {
+      // 클라이언트에서 번역을 보내지 않은 경우 서버에서 번역
+      translatedText = await translateText(originalText, originalLang, translatedLang, meeting.contexts)
+    }
 
     const transcript = await prisma.transcript.create({
       data: {

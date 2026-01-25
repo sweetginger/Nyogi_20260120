@@ -4,8 +4,7 @@ import { useEffect, useState, useCallback } from 'react'
 import Link from 'next/link'
 import { useParams, useRouter } from 'next/navigation'
 import { useSession } from 'next-auth/react'
-import { format } from 'date-fns'
-import { ko } from 'date-fns/locale'
+import { formatDate } from '@/lib/datetime'
 import {
   Plus,
   Users,
@@ -291,7 +290,7 @@ export default function WorkspaceDetailPage() {
                               </h3>
                               <div className="flex items-center gap-2 text-sm text-surface-500">
                                 <span>
-                                  {format(new Date(meeting.createdAt), 'M월 d일', { locale: ko })}
+                                  {formatDate(meeting.createdAt, 'M월 d일')}
                                 </span>
                                 <span>•</span>
                                 <span>{meeting.user.name}</span>
