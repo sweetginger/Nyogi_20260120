@@ -4,8 +4,7 @@ import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import { useSession } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
-import { format } from 'date-fns'
-import { ko } from 'date-fns/locale'
+import { formatDateTime, formatDurationText } from '@/lib/datetime'
 import {
   Plus,
   Video,
@@ -87,15 +86,6 @@ export default function MeetingsPage() {
     'in-person': '대면',
     zoom: 'Zoom',
     'google-meet': 'Google Meet',
-  }
-
-  const formatDuration = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600)
-    const minutes = Math.floor((seconds % 3600) / 60)
-    if (hours > 0) {
-      return `${hours}시간 ${minutes}분`
-    }
-    return `${minutes}분`
   }
 
   const filteredMeetings = meetings.filter((meeting) => {
@@ -210,9 +200,7 @@ export default function MeetingsPage() {
                             </h3>
                             <div className="flex flex-wrap items-center gap-2 text-sm text-surface-500 mt-1">
                               <span>
-                                {format(new Date(meeting.createdAt), 'yyyy년 M월 d일 HH:mm', {
-                                  locale: ko,
-                                })}
+                                {formatDateTime(meeting.createdAt, 'yyyy년 M월 d일 HH:mm')}
                               </span>
                               <span>•</span>
                               <span>{meetingTypeNames[meeting.meetingType]}</span>
@@ -227,7 +215,7 @@ export default function MeetingsPage() {
                           {meeting.duration > 0 && (
                             <div className="hidden sm:flex items-center gap-1.5 text-sm text-surface-500">
                               <Clock className="w-4 h-4" />
-                              {formatDuration(meeting.duration)}
+                              {formatDurationText(meeting.duration)}
                             </div>
                           )}
                           <span
